@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Scale Grid Image Tool</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#151515;color:#eee;font:14px Arial,sans-serif}
+header{padding:12px;background:#222;border-bottom:1px solid #444;display:flex;gap:12px;align-items:center;flex-wrap:wrap;position:sticky;top:0;z-index:5}
+h1{font-size:19px;margin:0 8px 0 0}.group{display:flex;align-items:center;gap:5px}label{color:#ccc;font-size:13px}
+input,select,button{background:#303030;color:#eee;border:1px solid #555;border-radius:5px;padding:7px}
+input[type=number]{width:80px}button{cursor:pointer}button:hover{background:#404040}
+.primary{background:#1769aa;border-color:#278bd0}.primary:hover{background:#2082c5}
+button:disabled{opacity:.4;cursor:not-allowed}
+#boxes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;padding:20px;align-items:start;background:#101010;min-height:calc(100vh - 60px)}
+@media(max-width:800px){#boxes{grid-template-columns:minmax(0,1fr)}}
+#empty{grid-column:1/-1;color:#777;text-align:center;padding:80px 0;line-height:1.6}
+.box{background:#1a1a1a;border:1px solid #3a3a3a;border-radius:8px;overflow:hidden;min-width:0}
+.boxhead{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:#242424;border-bottom:1px solid #3a3a3a}
+.name{font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-right:8px}
+.controls{padding:8px 10px;display:flex;gap:8px 12px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #2c2c2c}
+.controls input,.controls select,.controls button{padding:5px 6px;font-size:13px}
+.controls input[type=number]{width:70px}
+.status{padding:6px 10px;background:#1d1d1d;color:#bbb;font-size:12px;border-bottom:1px solid #2c2c2c}
+.cwrap{padding:10px;background:#101010;overflow:auto;line-height:0}
+canvas{display:block;max-width:100%;height:auto;cursor:crosshair;margin:0 auto}
+.remove{padding:3px 9px}
+</style>
+</head>
+<body>
+<header>
+<h1>Scale Grid</h1>
+<input id="file" type="file" accept="image/*" multiple>
+<span style="color:#999;font-size:13px">Each image gets its own box, lines and grid.</span>
+</header>
+<div id="boxes"><div id="empty">Add one or more images to begin.<br>Each image appears in its own box (2 per row, then going down).</div></div>
+
+<script>
+const factor={mm:1,cm:10,m:1000,in:25.4,ft:304.8,blocks:10,px:1};
+const boxes=document.getElementById("boxes"),fileInput=document.getElementById("file"),emptyMsg=document.getElementById("empty");
+
+fileInput.onchange=()=>{
+ [...fileInput.files].forEach(createBox);
+ fileInput.value="";
+};
+
+function createBox(f){
+ emptyMsg.style.display="none";
+ const box=document.createElement("div");box.className="box";
+ box.innerHTML=`
+  <div class="boxhead"><span class="name"></span><button class="remove" title="Remove this box">✕</button></div>
+  <div class="controls">
+   <span><label>Lines </label><select class="orient"><option value="v" selected>Vertical</option><option value="h">Horizontal</option></select></span>
+   <span><label>White extend % </label><input class="margin" type="number" min="0" max="200" step="1" value="25" title="White space added around the image before you place the lines"></span>
+   <span><label>Length </label><input class="length" type="number" min="0.000001" step="any" value="20">
+   <select class="unit"><option>mm</option><option selected>cm</option><option>m</option><option>in</option><option>ft</option><option>blocks</option><option>px</option></select></span>
+   <span><label>Grid </label><input class="spacing" type="number" min="0.000001" step="any" value="1">
+   <select class="gridUnit"><option selected>same</option><option>mm</option><option>cm</option><option>m</option><option>in</option><option>ft</option><option>blocks</option></select></span>
+   <button class="reset">Reset lines</button>
+   <button class="toggle">Hide grid</button>
+   <button class="export primary">Export PNG</button>
+  </div>
+  <div class="status"></div>
+  <div class="cwrap"><canvas></canvas></div>`;
+ boxes.appendChild(box);
+ const q=s=>box.querySelector(s);
+ const len=q(".length"),unit=q(".unit"),spacing=q(".spacing"),gridUnit=q(".gridUnit"),orient=q(".orient"),marginIn=q(".margin");
+ const reset=q(".reset"),toggle=q(".toggle"),exportBtn=q(".export"),status=q(".status"),canvas=q("canvas");
+ q(".name").textContent=f.name;
+ const ctx=canvas.getContext("2d");
+ const img=new Image();
+ let loaded=false,lines=[],calPx=0,showGrid=true,hover=null;
+
+ function gridFactor(){return gridUnit.value==="same"?factor[unit.value]:factor[gridUnit.value]}
+ function isVert(){return orient.value==="v"}
+ function gridPx(){
+  if(lines.length<2||!calPx)return 0;
+  const u=Number(len.value),s=Number(spacing.value);
+  if(!(u>0&&s>0))return 0;
+  return s*(factor[unit.value]/gridFactor())*(calPx/u);
+ }
+ function pad(a,S,gp){
+  const before=Math.ceil(a/gp-1e-9)*gp-a;
+  const after=Math.ceil((S-a)/gp-1e-9)*gp-(S-a);
+  return [Math.ceil(before-1e-9),Math.ceil(after-1e-9)];
+ }
+ function margin(){
+  const p=Math.max(0,Number(marginIn.value)||0);
+  return Math.round(Math.max(img.naturalWidth,img.naturalHeight)*p/100);
+ }
+ function layout(){
+  const W=img.naturalWidth,H=img.naturalHeight,m=margin();
+  const L={W,H,m,padL:m,padT:m,padR:m,padB:m,gp:0,ox:0,oy:0};
+  const gp=gridPx();L.gp=gp;
+  if(!showGrid||gp<=2)return L;
+  const v=isVert();
+  const [bl,br]=pad(v?lines[0]+m:0,W+2*m,gp);
+  const [bt,bb]=pad(v?0:lines[0]+m,H+2*m,gp);
+  L.padL=m+bl;L.padR=m+br;L.padT=m+bt;L.padB=m+bb;
+  L.ox=v?L.padL+lines[0]:L.padL-m;
+  L.oy=v?L.padT-m:L.padT+lines[0];
+  return L;
+ }
+ function render(c,L,markers){
+  const cw=L.padL+L.W+L.padR,ch=L.padT+L.H+L.padB;
+  c.canvas.width=cw;c.canvas.height=ch;
+  c.fillStyle="#fff";c.fillRect(0,0,cw,ch);
+  c.drawImage(img,L.padL,L.padT);
+  const v=isVert();
+  if(showGrid&&L.gp>2){
+   const gp=L.gp;
+   const ox=L.ox,oy=L.oy;
+   c.save();c.strokeStyle="rgba(0,255,255,.42)";
+   c.lineWidth=Math.max(1,Math.min(3,L.W/1800));
+   for(let x=((ox%gp)+gp)%gp;x<=cw+0.5;x+=gp){c.beginPath();c.moveTo(x,0);c.lineTo(x,ch);c.stroke()}
+   for(let y=((oy%gp)+gp)%gp;y<=ch+0.5;y+=gp){c.beginPath();c.moveTo(0,y);c.lineTo(cw,y);c.stroke()}
+   c.restore();
+  }
+  if(markers){
+   const items=lines.map((p,i)=>({p,label:i===0?"START":"END",solid:true}));
+   if(hover!==null&&lines.length<2)items.push({p:hover,label:lines.length===0?"START":"END",solid:false});
+   c.save();
+   c.lineWidth=Math.max(2,L.W/500);
+   const fs=Math.max(14,L.W/70);
+   c.font=`bold ${fs}px Arial`;
+   items.forEach(it=>{
+    const col=it.label==="START"?"#ff3030":"#ffb000";
+    c.strokeStyle=col;
+    c.setLineDash(it.solid?[]:[12,8]);
+    const pos=it.p+(v?L.padL:L.padT);
+    c.beginPath();
+    if(v){c.moveTo(pos,0);c.lineTo(pos,ch)}else{c.moveTo(0,pos);c.lineTo(cw,pos)}
+    c.stroke();
+    c.setLineDash([]);
+    const tw=c.measureText(it.label).width;
+    const bx=v?pos+6:6,by=v?fs+6:pos-6;
+    c.fillStyle="rgba(0,0,0,.65)";c.fillRect(bx-3,by-fs,tw+6,fs+6);
+    c.fillStyle=col;c.fillText(it.label,bx,by-2);
+   });
+   c.restore();
+  }
+ }
+ function setStatus(L){
+  if(!loaded){status.textContent="Loading image…";return}
+  if(lines.length===0){status.textContent="Click to place the START line.";return}
+  if(lines.length===1){status.textContent="Click to place the END line.";return}
+  if(!calPx){status.textContent="The start and end lines must be in different places.";return}
+  const ppu=calPx/Number(len.value);
+  const gu=gridUnit.value==="same"?unit.value:gridUnit.value;
+  let t=`Scale: ${ppu.toFixed(3)} px/${unit.value} • Grid: ${L.gp.toFixed(2)} px per ${spacing.value} ${gu}`;
+  const added=L.padL+L.padR+L.padT+L.padB;
+  if(added>0)t+=` • White added: L${L.padL} R${L.padR} T${L.padT} B${L.padB} px`;
+  status.textContent=t;
+ }
+ function draw(){
+  if(!loaded)return;
+  const L=layout();
+  render(ctx,L,true);
+  setStatus(L);
+ }
+ function linePos(e){
+  const L=layout();
+  const r=canvas.getBoundingClientRect();
+  const x=(e.clientX-r.left)*canvas.width/r.width-L.padL;
+  const y=(e.clientY-r.top)*canvas.height/r.height-L.padT;
+  const p=isVert()?x:y,max=isVert()?L.W:L.H;
+  return Math.max(-L.m,Math.min(max+L.m,p));
+ }
+
+ canvas.onclick=e=>{
+  if(!loaded||lines.length>=2)return;
+  lines.push(linePos(e));hover=null;
+  if(lines.length===2)calPx=Math.abs(lines[1]-lines[0]);
+  draw();
+ };
+ canvas.onmousemove=e=>{if(!loaded||lines.length>=2)return;hover=linePos(e);draw()};
+ canvas.onmouseleave=()=>{if(hover!==null){hover=null;draw()}};
+ reset.onclick=()=>{lines=[];calPx=0;hover=null;draw()};
+ toggle.onclick=()=>{showGrid=!showGrid;toggle.textContent=showGrid?"Hide grid":"Show grid";draw()};
+ orient.onchange=marginIn.oninput=()=>{lines=[];calPx=0;hover=null;draw()};
+ [len,unit,spacing,gridUnit].forEach(x=>x.oninput=draw);
+ exportBtn.onclick=()=>{
+  if(!loaded||lines.length!==2||!calPx)return;
+  const out=document.createElement("canvas");
+  render(out.getContext("2d"),layout(),false);
+  const a=document.createElement("a");
+  a.download=f.name.replace(/\.[^.]+$/,"")+"-grid.png";
+  a.href=out.toDataURL("image/png");a.click();
+ };
+ q(".remove").onclick=()=>{
+  box.remove();
+  if(!boxes.querySelector(".box"))emptyMsg.style.display="";
+ };
+
+ status.textContent="Loading image…";
+ const url=URL.createObjectURL(f);
+ img.onload=()=>{loaded=true;draw();URL.revokeObjectURL(url)};
+ img.onerror=()=>{status.textContent="Could not load this image.";URL.revokeObjectURL(url)};
+ img.src=url;
+}
+</script>
+</body>
+</html>
